@@ -44,7 +44,7 @@ jobs:
                 suffix=""
             fi
             sed -i -e "s/SUFFIX=\".*\"/SUFFIX=\"${suffix}\"/g" \
-                   -e "s/VERSION=\".*\"/VERSION=\"${version}\"" \
+                   -e "s/VERSION=\".*\"/VERSION=\"${version}\"/g" \
                  ${{ inputs.version_dir }}/__init__.py 
 
         - name: Fetch dependencies
