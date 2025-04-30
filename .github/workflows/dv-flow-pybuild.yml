@@ -1,0 +1,73 @@
+
+name: dv-flow-pybuild
+on:
+  workflow_call:
+    inputs:
+        version_dir:
+            required: true
+            type: string
+        tests_dir:
+            required: false
+            type: string
+            default: tests
+        ivpm_target:
+            required: false
+            type: string
+            default: default-dev
+        build_docs:
+            type: boolean
+            default: false
+    secrets:
+      PYPI_API_TOKEN:
+        required: true
+
+jobs:
+    linux:
+        runs-on: ubuntu-latest
+        steps:
+        - name: checkout
+          uses: actions/checkout@v4
+        - name: Update Version
+          shell: bash
+          run: |
+            tag=$(git tag -l --contains HEAD)
+            echo "tag: ${tag}"
+
+            version=$(grep version pyproject.toml | sed -e 's/^.*=.*"\([^"][^"]*\)".*$/\1/')
+
+            if test -z ${tag}; then
+                # Candidate release
+                echo "Configuring a candidate release"
+                suffix="${{ github.run_id }}rc0"
+            else
+                echo "Configuring a full release"
+                suffix=""
+            fi
+            sed -i -e "s/SUFFIX=\".*\"/SUFFIX=\"${suffix}\"/g" \
+                   -e "s/VERSION=\".*\"/VERSION=\"${version}\"" \
+                 ${{ inputs.version_dir }}/__init__.py 
+
+        - name: Fetch dependencies
+          shell: bash
+          run: |
+            python3 -m venv py
+            ./py/bin/pip install --upgrade --pre ivpm
+            ./py/bin/ivpm update -a -d default-dev 
+        - name: Run tests
+          run: |
+            ./packages/python/bin/pytest ${{ tests_dir }}
+
+        - name: Build packages
+          run: |
+            ./packages/python/bin/build .
+
+        - name: Publish to PyPi
+          if: ${{ startsWith(github.ref, 'refs/heads/main') || startsWith(github.ref, 'refs/tags/v') }}
+          env:
+            TWINE_USERNAME: __token__
+            TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          run: |
+            ./py/bin/python3 -m pip install -U twine packaging
+            ./py/bin/python3 -m twine upload dist/*.whl
+
+
