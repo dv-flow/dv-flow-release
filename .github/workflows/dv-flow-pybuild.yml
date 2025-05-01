@@ -49,7 +49,7 @@ jobs:
             sed -i -e "s/SUFFIX=\".*\"/SUFFIX=\"${suffix}\"/g" \
                    -e "s/VERSION=\".*\"/VERSION=\"${version}\"/g" \
                  ${{ inputs.version_dir }}/__init__.py 
-            sed -i -e "s/version.*=\".*\"/version =\"${version}${suffix}\"/g" \
+            sed -i -e "s/version.*=.*\".*\"/version = \"${version}${suffix}\"/g" \
                    pyproject.toml
 
         - name: Fetch dependencies
