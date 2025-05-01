@@ -10,6 +10,9 @@ on:
             required: false
             type: string
             default: tests
+        pythonpath:
+            required: false
+            type: string
         ivpm_target:
             required: false
             type: string
@@ -56,6 +59,7 @@ jobs:
             ./packages/python/bin/pip install --upgrade build
         - name: Run tests
           run: |
+            export PYTHONPATH=${{ inputs.pythonpath }}
             ./packages/python/bin/pytest ${{ inputs.tests_dir }}
 
         - name: Build packages
