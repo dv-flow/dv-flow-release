@@ -6,6 +6,10 @@ on:
         version_dir:
             required: true
             type: string
+        run_tests:
+            required: false
+            type: boolean
+            default: true
         tests_dir:
             required: false
             type: string
@@ -60,6 +64,7 @@ jobs:
             ./py/bin/ivpm update -a -d default-dev 
             ./packages/python/bin/pip install --upgrade build
         - name: Run tests
+          if: ${{ inputs.run_tests }}
           run: |
             export PYTHONPATH=${{ inputs.pythonpath }}
             ./packages/python/bin/pytest ${{ inputs.tests_dir }}
