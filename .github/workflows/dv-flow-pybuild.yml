@@ -67,6 +67,7 @@ jobs:
           if: ${{ inputs.run_tests }}
           run: |
             export PYTHONPATH=${{ inputs.pythonpath }}
+            ./packages/python/bin/python -m build -n .
             ./packages/python/bin/pytest ${{ inputs.tests_dir }}
 
         - name: Build packages
