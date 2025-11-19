@@ -40,7 +40,7 @@ jobs:
             tag=$(git tag -l --contains HEAD)
             echo "tag: ${tag}"
 
-            version=$(grep version pyproject.toml | sed -e 's/^.*=.*"\([^"][^"]*\)".*$/\1/')
+            version=$(grep version pyproject.toml | sed -e 's%^.*=.*"\([^"][^"]*\)".*$%\1%')
 
             if test -z ${tag}; then
                 # Candidate release
