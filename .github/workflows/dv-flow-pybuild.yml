@@ -40,7 +40,7 @@ jobs:
             tag=$(git tag -l --contains HEAD)
             echo "tag: ${tag}"
 
-            version=$(grep version pyproject.toml | sed -e 's%^.*=.*"\([^"][^"]*\)".*$%\1%')
+            version=$(grep -w version pyproject.toml | sed -e 's%^.*=.*"\([^"][^"]*\)".*$%\1%')
 
             if test -z ${tag}; then
                 # Candidate release
@@ -50,10 +50,10 @@ jobs:
                 echo "Configuring a full release"
                 suffix=""
             fi
-            sed -i -e "s/SUFFIX=\".*\"/SUFFIX=\"${suffix}\"/g" \
-                   -e "s/VERSION=\".*\"/VERSION=\"${version}\"/g" \
+            sed -i -e "s%SUFFIX=\".*\"%SUFFIX=\"${suffix}\"%g" \
+                   -e "s%VERSION=\".*\"%VERSION=\"${version}\"%g" \
                  ${{ inputs.version_dir }}/__init__.py 
-            sed -i -e "s/version.*=.*\".*\"/version = \"${version}${suffix}\"/g" \
+            sed -i -e "s%version.*=.*\".*\"%version = \"${version}${suffix}\"%g" \
                    pyproject.toml
 
         - name: Fetch dependencies
