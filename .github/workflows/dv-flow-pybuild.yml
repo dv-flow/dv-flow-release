@@ -45,7 +45,8 @@ jobs:
             if test -z ${tag}; then
                 # Candidate release
                 echo "Configuring a candidate release"
-                suffix="${{ github.run_id }}rc0"
+                #suffix="${{ github.run_id }}rc0"
+                suffix="${{ github.run_id }}"
             else
                 echo "Configuring a full release"
                 suffix=""
