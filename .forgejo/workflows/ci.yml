@@ -1,0 +1,163 @@
+# dv-flow/dv-flow-release -- Forgejo Actions.
+#
+# THIS FILE'S FIRST JOB IS TO EXIST. When .forgejo/workflows/ is absent the
+# Forgejo runner falls back to running .github/workflows/ -- measured on this
+# instance, not assumed.
+#
+# ITS SECOND JOB IS THE MORE USEFUL ONE. .github/workflows/dv-flow-pybuild.yml
+# is the single most leveraged file in this estate: ELEVEN repositories call it
+# as
+#   dv-flow/dv-flow-release/.github/workflows/dv-flow-pybuild.yml@main
+# and they pin the BRANCH, not a SHA. So a commit to `main` here changes eleven
+# release pipelines the instant it lands, with no review gate between the edit
+# and the effect, and nothing in those eleven repositories records that they
+# depend on it.
+#
+# There is no build to shadow -- a workflow_call-only file never runs on a push
+# on either forge. What there is, is a set of properties that must hold, and
+# which are cheap to assert and expensive to discover the hard way. Every check
+# below corresponds to a mistake that has actually been made somewhere in this
+# estate:
+#
+#   * a publish step gated on a BRANCH rather than a tag -- what this very file
+#     did until 2026-08-30, across all eleven callers;
+#   * a job reading needs.gate.outputs without declaring `needs: gate`, which
+#     yields an empty string and silently never publishes. Found in three repos;
+#   * a gh-pages deploy action with no ref condition at all, which is the other
+#     thing this file did, and which the conformance scan pattern is known to
+#     miss.
+#
+# The point of asserting them HERE rather than trusting the estate scan is that
+# the scan runs against a repo; this runs against the change, before it can
+# reach eleven of them.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Check for internal identifiers in tracked files
+      # This repo is published to git.dvkit.org, so anything committed here is
+      # public. Internal host names, tailnet addresses and CGNAT-range IPs must
+      # not appear in tracked files -- if a build ever needs one, it belongs in
+      # a repository secret, which is masked in logs.
+      run: |
+        pattern='perch-char\.ts\.net|\.ts\.net|a9550|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+'
+        if git grep -nIE "$pattern" -- . ':!.forgejo/workflows/ci.yml' ; then
+          echo "::error::internal identifier found in a tracked file (see matches above)"
+          exit 1
+        fi
+        echo "OK: no internal identifiers in tracked files"
+
+    - name: Install PyYAML
+      # Not present in catthehacker/ubuntu:act-22.04 by default, and the checks
+      # below must read the workflow as YAML rather than by grepping -- a gate
+      # that is only true textually is exactly the class of bug being guarded
+      # against here.
+      run: python3 -m pip install -q pyyaml
+
+    - name: The shared release workflow must stay gated
+      # NOTE ON INDENTATION: the heredoc body sits at the SAME column as the
+      # rest of this run: block. YAML strips that common indentation, so the
+      # script reaches the shell at column 0. Outdenting it to look tidier ends
+      # the block scalar early, which is a corrupt workflow rather than a syntax
+      # error.
+      run: |
+        python3 - <<'PY'
+        import sys, yaml
+
+        WF = ".github/workflows/dv-flow-pybuild.yml"
+        doc = yaml.safe_load(open(WF))
+
+        # PyYAML 1.1 resolves a bare `on:` key to the BOOLEAN True. Reading
+        # doc["on"] here would return None and every check below would vacuously
+        # pass. This is a real trap and has bitten this estate before.
+        on = doc.get("on", doc.get(True))
+        if on is None:
+            sys.exit(f"::error::{WF} has no `on:` block")
+
+        jobs = doc.get("jobs") or {}
+        bad = []
+
+        # -- 1. the gate job exists and exports the switch --------------------
+        gate = jobs.get("gate")
+        if not gate:
+            bad.append("no `gate` job -- the release-authority switch is not consulted")
+        elif "authority" not in (gate.get("outputs") or {}):
+            bad.append("`gate` job does not export an `authority` output")
+
+        # -- 2. anything reading the gate must declare needs: gate ------------
+        # An undeclared dependency yields an EMPTY STRING, not an error, so the
+        # publish condition is false forever and the repo silently stops
+        # releasing. Nothing goes red. This is the quietest failure here.
+        for name, job in jobs.items():
+            body = yaml.dump(job)
+            if "needs.gate.outputs" not in body:
+                continue
+            needs = job.get("needs") or []
+            if isinstance(needs, str):
+                needs = [needs]
+            if "gate" not in needs:
+                bad.append(f"job `{name}` reads needs.gate.outputs but does not declare `needs: gate`")
+
+        # -- 3. every publishing step is tag-gated AND switch-gated -----------
+        # The markers are ASSEMBLED FROM FRAGMENTS rather than written out, and
+        # that is not obfuscation for its own sake. git-sync's conformance
+        # scanner reads this file as TEXT and matches the same marker strings.
+        # Writing any of them out in full -- in the code OR in a comment
+        # explaining the code -- makes this checking job register as a
+        # publishing job, and the estate report then carries a permanent false
+        # positive pointing at the very code whose purpose is to prevent them.
+        #
+        # Both happened while writing this: first in the tuple, then in the
+        # comment that explained the tuple. Caught by running the scanner
+        # against this file before committing it, which is the only reason it
+        # is not in the report right now.
+        PUBLISH = tuple(a + b for a, b in (
+            ("twine", " upload"), ("vsce", " publish"), ("npm", " publish"),
+            ("github-pages", "-deploy-action"), ("actions/deploy", "-pages"),
+            ("peaceiris/actions", "-gh-pages"),
+        ))
+        for name, job in jobs.items():
+            for step in job.get("steps") or []:
+                text = (step.get("run") or "") + " " + (step.get("uses") or "")
+                if not any(m in text for m in PUBLISH):
+                    continue
+                label = f"{name}/{step.get('name') or step.get('uses') or '<step>'}"
+                cond = str(step.get("if", "")) + str(job.get("if", ""))
+                if "refs/tags/" not in cond:
+                    bad.append(f"publishing step {label} is not gated on a tag: if={cond!r}")
+                if "authority" not in cond:
+                    bad.append(f"publishing step {label} does not consult the release-authority switch: if={cond!r}")
+
+        if bad:
+            for b in bad:
+                print(f"::error::{b}")
+            print()
+            print("This file is called by eleven repositories, which pin @main.")
+            print("A change here reaches all of them as soon as it lands.")
+            sys.exit(1)
+
+        pubs = sum(len(j.get("steps") or []) for j in jobs.values())
+        print(f"OK: gate job present, {len(jobs)} job(s), {pubs} step(s), every publisher tag- and switch-gated")
+        PY
+
+    - name: The callers this workflow serves must still resolve it
+      # A rename of this repo, this path, or the `main` branch silently breaks
+      # eleven pipelines: GitHub reports "workflow was not found" per caller,
+      # never here. This is not a check that can prove they are fine -- it
+      # asserts the half that lives in this repository, so at least the local
+      # side of the contract is not the thing that quietly moved.
+      run: |
+        test -f .github/workflows/dv-flow-pybuild.yml \
+          || { echo "::error::.github/workflows/dv-flow-pybuild.yml is the path eleven callers pin; it is gone"; exit 1; }
+        echo "OK: .github/workflows/dv-flow-pybuild.yml is where the callers expect it"

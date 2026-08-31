@@ -1,3 +1,45 @@
+# dv-flow shared Python build+release workflow.
+#
+# ELEVEN REPOSITORIES CALL THIS FILE. dv-flow-mgr, dv-flow-libcc,
+# dv-flow-libcocotb, dv-flow-libformal, dv-flow-libfusesoc, dv-flow-libgh,
+# dv-flow-libhdlsim, dv-flow-libide, dv-flow-libpss, dv-flow-librdl and
+# pytest-dfm all resolve it as
+#   dv-flow/dv-flow-release/.github/workflows/dv-flow-pybuild.yml@main
+# so an edit here is an edit to eleven release pipelines at once, and it takes
+# effect the moment it lands on `main` -- callers pin the branch, not a SHA.
+# Treat every change to this file accordingly.
+#
+# ---------------------------------------------------------------------------
+# CONVERTED 2026-08-30 (github-coexistence-completion-plan.md Phase 6, wave 2)
+#
+# WHAT THIS WORKFLOW USED TO DO:
+#
+#   - name: Publish to PyPi
+#     if: ${{ startsWith(github.ref, 'refs/heads/main') || ... }}
+#
+# A PUSH TO main PUBLISHED TO PyPI. Tags were an alternative trigger, not the
+# trigger. Eleven repositories, every one of them releasing on every push to
+# its default branch.
+#
+# That is survivable while nothing else writes to `main`. dv-flow is now
+# entering a 5-minute bidirectional Forgejo<->GitHub mirror, and onboarding
+# pushes the Forgejo-side history up to GitHub -- which is a push to `main`,
+# which was a release. Six repos were ahead at the time of writing, so the
+# first sync cycle would have published six packages as a side effect of
+# mirroring. A mirror operation must never be a publish operation.
+#
+# It was ALSO not the only publisher here. `Publish Docs` ran
+# JamesIves/github-pages-deploy-action on EVERY event -- every branch, every
+# pull request -- with no condition at all, whenever a caller passed
+# build_docs: true. That one has been deleted outright rather than gated:
+# dvkit.org owns all documentation, and a tag-gated gh-pages deploy is still a
+# second publisher of the same content on a different schedule. The docs BUILD
+# stays, as a CI check.
+#
+# DECISION, 2026-08-30: publish FAILS CLOSED on an unreachable switch. A release
+# blocked by a dvkit.org outage is recoverable; a release published twice from
+# two forges is not, and a PyPI version can be yanked but never reused.
+# ---------------------------------------------------------------------------
 
 name: dv-flow-pybuild
 on:
@@ -29,7 +71,53 @@ on:
         required: true
 
 jobs:
+    gate:
+        # Release master switch. ONE file, above both platforms, decides who
+        # releases each repo:
+        #   https://dvkit.org/.well-known/release-authority.json
+        # Generated from sync-policy.toml by `git-sync emit-release-authority`,
+        # so GitHub and Forgejo cannot drift -- there is only one copy for them
+        # to disagree about. The runner only READS it, over plain HTTPS with no
+        # credential: a workflow file is public and editable by anyone who can
+        # push.
+        #
+        # THIS IS A SEPARATE JOB AND HAS TO BE. `if:` on a job cannot reference
+        # a step in its own job, and the publish step below consumes the answer
+        # through needs.gate.outputs.authority -- which is an empty string, and
+        # therefore silently never publishes, if the consuming job forgets
+        # `needs: gate`. That exact mistake was found in three repos elsewhere
+        # in this estate. The `linux` job below declares it.
+        #
+        # GITHUB_REPOSITORY here is the CALLING repository, not
+        # dv-flow/dv-flow-release, which is what makes one gate serve eleven.
+        name: Release authority
+        runs-on: ubuntu-latest
+        outputs:
+          authority: ${{ steps.resolve.outputs.authority }}
+        steps:
+          - id: resolve
+            # One line on purpose: a multi-line `python3 -c` has to start at
+            # column 0, which terminates the YAML block scalar and silently
+            # corrupts the workflow.
+            run: |
+              url=https://dvkit.org/.well-known/release-authority.json
+              if ! body=$(curl -fsS --max-time 10 "$url"); then
+                case "$GITHUB_REF" in
+                  refs/tags/v*)
+                    echo "::error::release-authority switch unreachable; refusing to publish"
+                    exit 1 ;;
+                  *)
+                    echo "authority=none" >> "$GITHUB_OUTPUT"
+                    echo "switch unreachable on a non-tag ref; nothing to release"
+                    exit 0 ;;
+                esac
+              fi
+              auth=$(printf '%s' "$body" | python3 -c 'import json,os,sys; d=json.load(sys.stdin); r=os.environ["GITHUB_REPOSITORY"]; print(d["repos"].get(r) or d["orgs"].get(r.split("/")[0]) or d["default"])')
+              echo "release authority for $GITHUB_REPOSITORY: $auth"
+              echo "authority=$auth" >> "$GITHUB_OUTPUT"
+
     linux:
+        needs: gate
         runs-on: ubuntu-latest
         steps:
         - name: checkout
@@ -43,26 +131,43 @@ jobs:
             version=$(grep -w version pyproject.toml | sed -e 's%^.*=.*"\([^"][^"]*\)".*$%\1%')
 
             if test -z ${tag}; then
-                # Candidate release
-                echo "Configuring a candidate release"
-                #suffix="${{ github.run_id }}rc0"
-                suffix="${{ github.run_id }}"
+                # NOT a release. The suffix is a PEP 440 LOCAL VERSION SEGMENT
+                # -- the part after the '+' -- and PyPI rejects any upload
+                # carrying one, outright, at the tool.
+                #
+                # That is the point. It used to be a bare "${{ github.run_id }}",
+                # giving 0.0.1<run-id>, which is a perfectly valid and perfectly
+                # uploadable PyPI version. The tag gate below is the control;
+                # this is the backstop for the day someone edits the gate. A
+                # dev build should not merely be unpublished, it should be
+                # unpublishABLE.
+                #
+                # `.dev` sorts BELOW the release it is derived from, so
+                # 0.0.1.dev123+gh precedes 0.0.1 rather than shadowing it.
+                #
+                # The platform tag is not decoration. GITHUB_RUN_ID is not
+                # unique across forges: GitHub's is an 11-digit global counter,
+                # Forgejo's a per-repo index that restarts if the instance is
+                # rebuilt. Without it the two collide.
+                echo "Configuring a development build (not publishable)"
+                suffix=".dev${{ github.run_id }}+gh"
             else
                 echo "Configuring a full release"
                 suffix=""
             fi
             sed -i -e "s%SUFFIX=\".*\"%SUFFIX=\"${suffix}\"%g" \
                    -e "s%VERSION=\".*\"%VERSION=\"${version}\"%g" \
-                 ${{ inputs.version_dir }}/__init__.py 
+                 ${{ inputs.version_dir }}/__init__.py
             sed -i -e "s%version.*=.*\".*\"%version = \"${version}${suffix}\"%g" \
                    pyproject.toml
+            echo "building version ${version}${suffix}"
 
         - name: Fetch dependencies
           shell: bash
           run: |
             python3 -m venv py
             ./py/bin/pip install --upgrade --pre ivpm
-            ./py/bin/ivpm update -a -d default-dev 
+            ./py/bin/ivpm update -a -d default-dev
             ./packages/python/bin/pip install -U typing_extensions build
         - name: Run tests
           if: ${{ inputs.run_tests }}
@@ -76,26 +181,56 @@ jobs:
             ./packages/python/bin/python -m build .
 
         - name: Build Docs
+          # KEPT as a CI check. `make html` is what catches a broken
+          # cross-reference on the commit that introduced it, and losing that
+          # was never the intent. Only the publication left -- see below.
           if: ${{ inputs.build_docs }}
           run: |
             cd docs
             make html
             touch _build/html/.nojekyll
 
-        - name: Publish Docs
-          if: ${{ inputs.build_docs }}
-          uses: JamesIves/github-pages-deploy-action@4.1.7
-          with:
-            branch: gh-pages
-            folder: docs/_build/html
+        # `Publish Docs` WAS HERE and is deliberately gone.
+        #
+        #   - name: Publish Docs
+        #     if: ${{ inputs.build_docs }}
+        #     uses: JamesIves/github-pages-deploy-action@4.1.7
+        #
+        # It had no ref condition whatsoever: every push on every branch, and
+        # every pull request, force-wrote the caller's gh-pages branch. It is
+        # also the specific action the release-conformance scan pattern was
+        # known to miss, so it never appeared in a report.
+        #
+        # dvkit.org owns all documentation now. Deleting rather than tag-gating
+        # is deliberate: a tag-gated gh-pages deploy is still a second publisher
+        # of the same content on a different schedule, and two publishers of one
+        # doc set is the problem regardless of how rarely the second fires.
+        #
+        # The gh-pages BRANCHES still exist and are still served by GitHub Pages
+        # (build_type "legacy") on twelve dv-flow repos. Nothing writes to them
+        # any more; retiring the sites themselves is a separate, user-visible
+        # step recorded in the migration STATUS.md.
 
         - name: Publish to PyPi
-          if: ${{ startsWith(github.ref, 'refs/heads/main') || startsWith(github.ref, 'refs/tags/v') }}
+          # A TAG, and the switch naming THIS forge. A push to a branch never
+          # releases anything -- that is what makes the 5-minute mirror safe.
+          #
+          # SKIPS, does not fail, when the switch names Forgejo: a red build on
+          # the dormant side every time anyone tags would train people to ignore
+          # the signal, which is worse than no signal.
+          if: ${{ startsWith(github.ref, 'refs/tags/v') && needs.gate.outputs.authority == 'github' }}
           env:
             TWINE_USERNAME: __token__
             TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
           run: |
+            if [ -z "$TWINE_PASSWORD" ]; then
+              echo "::error::PYPI_API_TOKEN is not visible to this repository"
+              exit 1
+            fi
             ./py/bin/python3 -m pip install -U twine packaging
-            ./py/bin/python3 -m twine upload dist/*.whl
-
-
+            ./py/bin/python3 -m twine check dist/*.whl
+            # --skip-existing is the idempotence net: with one switch and two
+            # possible publishers, a double-fire must be a no-op rather than a
+            # hard failure. Without it a re-run of a tag build fails on
+            # "File already exists", which reads like a broken release.
+            ./py/bin/python3 -m twine upload --non-interactive --skip-existing dist/*.whl
