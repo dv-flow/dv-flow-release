@@ -128,7 +128,23 @@ jobs:
             tag=$(git tag -l --contains HEAD)
             echo "tag: ${tag}"
 
-            version=$(grep -w version pyproject.toml | sed -e 's%^.*=.*"\([^"][^"]*\)".*$%\1%')
+            # A package may keep its version in <version_dir>/__version__.py
+            # (BASE = "x.y.z", SUFFIX = "") with pyproject.toml reading it via
+            # `dynamic = ["version"]`. Then that file is the ONE source: the
+            # version is read from it and the suffix stamped into it, and
+            # pyproject.toml is left alone -- it has no version line to read,
+            # and the old sed would clobber its `version = {attr = ...}`.
+            # Repos without the file keep the pyproject/__init__.py path.
+            vfile="${{ inputs.version_dir }}/__version__.py"
+            if test -f "${vfile}"; then
+                version=$(sed -n -e 's%^BASE *= *"\([^"][^"]*\)".*$%\1%p' "${vfile}")
+            else
+                version=$(grep -w version pyproject.toml | sed -e 's%^.*=.*"\([^"][^"]*\)".*$%\1%')
+            fi
+            if test -z "${version}"; then
+                echo "::error::could not read the package version"
+                exit 1
+            fi
 
             if test -z ${tag}; then
                 # NOT a release. The suffix is a PEP 440 LOCAL VERSION SEGMENT
@@ -155,11 +171,21 @@ jobs:
                 echo "Configuring a full release"
                 suffix=""
             fi
-            sed -i -e "s%SUFFIX=\".*\"%SUFFIX=\"${suffix}\"%g" \
-                   -e "s%VERSION=\".*\"%VERSION=\"${version}\"%g" \
-                 ${{ inputs.version_dir }}/__init__.py
-            sed -i -e "s%version.*=.*\".*\"%version = \"${version}${suffix}\"%g" \
-                   pyproject.toml
+            if test -f "${vfile}"; then
+                sed -i -e "s%^SUFFIX *= *\".*\"%SUFFIX = \"${suffix}\"%" "${vfile}"
+                # sed does not fail on no match; a stamp that bit on nothing
+                # would build a dev wheel carrying the release version.
+                if ! grep -qF "SUFFIX = \"${suffix}\"" "${vfile}"; then
+                    echo "::error::${vfile} has no SUFFIX = \"...\" line to stamp"
+                    exit 1
+                fi
+            else
+                sed -i -e "s%SUFFIX=\".*\"%SUFFIX=\"${suffix}\"%g" \
+                       -e "s%VERSION=\".*\"%VERSION=\"${version}\"%g" \
+                     ${{ inputs.version_dir }}/__init__.py
+                sed -i -e "s%version.*=.*\".*\"%version = \"${version}${suffix}\"%g" \
+                       pyproject.toml
+            fi
             echo "building version ${version}${suffix}"
 
         - name: Fetch dependencies
